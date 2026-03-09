@@ -7,9 +7,14 @@ import filters
 
 from logger import Logger
 
+from database.setup import setup_db
+
+setup_db()
+
 filters.setup(dp)
 
 user_message = 'Пользователь'
+
 
 
 @dp.message_handler(commands='start')
