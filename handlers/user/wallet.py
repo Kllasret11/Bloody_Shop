@@ -7,7 +7,6 @@ from aiogram.types import Message
 
 from filters import IsUser
 from loader import dp, db
-from .menu import balance
 
 PROFILE_IMAGE_PATH = Path(__file__).resolve().parents[2] / "profile.jpg"
 
