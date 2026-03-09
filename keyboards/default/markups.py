@@ -1,31 +1,40 @@
-from aiogram.types import ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 back_message = '👈 Назад'
+cancel_message = '🚫 Отменить'
 confirm_message = '✅ Подтвердить заказ'
 all_right_message = '✅ Все верно'
-cancel_message = '🚫 Отменить'
 
-def confirm_markup():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.add(confirm_message)
+
+def user_menu_markup() -> ReplyKeyboardMarkup:
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('🛍️ Каталог'))
+    markup.row(KeyboardButton('💰 Баланс'), KeyboardButton('🛒 Корзина'))
+    markup.row(KeyboardButton('🚚 Мои заказы'))
+    return markup
+
+
+def admin_menu_markup() -> ReplyKeyboardMarkup:
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('📂 Категории'), KeyboardButton('➕ Товар'))
+    markup.row(KeyboardButton('💳 Изменить цену'), KeyboardButton('💸 Пополнить баланс'))
+    markup.row(KeyboardButton('📦 Заказы'), KeyboardButton('🔒 Выйти из админки'))
+    return markup
+
+
+def back_markup() -> ReplyKeyboardMarkup:
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(back_message)
-
     return markup
 
-def back_markup():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.add(back_message)
 
+def cancel_markup() -> ReplyKeyboardMarkup:
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(cancel_message)
     return markup
 
-def check_markup():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.row(back_message, all_right_message)
 
-    return markup
-
-def submit_markup():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.row(cancel_message, all_right_message)
-
+def confirm_order_markup() -> ReplyKeyboardMarkup:
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(confirm_message, back_message)
     return markup

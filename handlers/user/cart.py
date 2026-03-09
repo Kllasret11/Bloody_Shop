@@ -1,206 +1,169 @@
-import logging
 from aiogram.dispatcher import FSMContext
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from aiogram.types.chat import ChatActions
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
 
-from keyboards.inline.products_from_cart import product_markup, product_cb
-from keyboards.default.markups import *
-from states import CheckoutState
-from loader import dp, db, bot
 from filters import IsUser
-from .menu import cart
+from keyboards.default.markups import back_message, confirm_message, confirm_order_markup, user_menu_markup
+from keyboards.inline.store import cart_item_markup
+from loader import dp, db
+from states import CheckoutState
 
 
-@dp.message_handler(IsUser(), text=cart)
-async def process_cart(message: Message, state: FSMContext):
-    cart_data = db.fetchall('SELECT * FROM cart WHERE cid=?', (message.chat.id,))
-
-    if len(cart_data) == 0:
-        return await message.answer('Ваша корзина пуста.')
-
-    await bot.send_chat_action(message.chat.id, ChatActions.TYPING)
-    async with state.proxy() as data:
-        data['products'] = {}
-
-    order_cost = 0
-
-    for _, idx, count_in_cart in cart_data:
-        product = db.fetchone('SELECT * FROM products WHERE idx=?', (idx,))
-
-        if product is None:
-            db.query('DELETE FROM cart WHERE idx=?', (idx,))
-            continue
-
-        _, title, body, image, price, _ = product
-        order_cost += price * count_in_cart
-
-        async with state.proxy() as data:
-            data['products'][idx] = [title, price, count_in_cart]
-
-        markup = product_markup(idx, count_in_cart)
-        text = f'<b>{title}</b>\n\n{body}\n\nЦена: {price}₸.'
-
-        await message.answer_photo(photo=image, caption=text, reply_markup=markup)
-
-    if order_cost != 0:
-        markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-        markup.add('📦 Оформить заказ')
-        await message.answer(f'Текущая сумма корзины: <b>{order_cost}₸</b>.\nПерейти к оформлению?', reply_markup=markup)
+def _cart_rows(user_id: int):
+    return db.fetchall(
+        '''
+        SELECT p.id, p.title, p.description, p.photo_file_id, p.price, c.quantity
+        FROM cart_items c
+        JOIN products p ON p.id = c.product_id
+        WHERE c.user_id = ? AND p.is_active = TRUE
+        ORDER BY p.id DESC
+        ''',
+        (user_id,),
+    )
 
 
-@dp.callback_query_handler(IsUser(), product_cb.filter(action='count'))
-@dp.callback_query_handler(IsUser(), product_cb.filter(action='increase'))
-@dp.callback_query_handler(IsUser(), product_cb.filter(action='decrease'))
-async def product_callback_handler(query: CallbackQuery, callback_data: dict, state: FSMContext):
-    idx = callback_data['id']
-    action = callback_data['action']
+def _cart_total(rows) -> float:
+    return sum(float(price) * int(quantity) for _, _, _, _, price, quantity in rows)
 
-    if 'count' == action:
-        async with state.proxy() as data:
-            if 'products' not in data.keys():
-                await process_cart(query.message, state)
-            else:
-                await query.answer('Количество - ' + str(data['products'][idx][2]))
+
+@dp.message_handler(IsUser(), text='🛒 Корзина')
+async def show_cart(message: Message):
+    rows = _cart_rows(message.from_user.id)
+    if not rows:
+        await message.answer('Корзина пуста.')
         return
-
-    async with state.proxy() as data:
-        if 'products' not in data.keys():
-            await process_cart(query.message, state)
-            return
-
-        data['products'][idx][2] += 1 if 'increase' == action else -1
-        count_in_cart = data['products'][idx][2]
-
-        if count_in_cart == 0:
-            db.query('DELETE FROM cart WHERE cid = ? AND idx = ?', (query.message.chat.id, idx))
-            await query.message.delete()
+    for product_id, title, description, photo_file_id, price, quantity in rows:
+        text = f'<b>{title}</b>\n{description}\n\nЦена: {float(price):.2f}₸\nКоличество: {quantity}'
+        if photo_file_id:
+            await message.answer_photo(photo_file_id, caption=text, reply_markup=cart_item_markup(product_id, quantity))
         else:
-            db.query('UPDATE cart SET quantity = ? WHERE cid = ? AND idx = ?', (count_in_cart, query.message.chat.id, idx))
-            await query.message.edit_reply_markup(product_markup(idx, count_in_cart))
+            await message.answer(text, reply_markup=cart_item_markup(product_id, quantity))
+    total = _cart_total(rows)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row('📦 Оформить заказ')
+    markup.row('🛍️ Каталог', '💰 Баланс')
+    await message.answer(f'Итого: <b>{total:.2f}₸</b>', reply_markup=markup)
+
+
+@dp.callback_query_handler(lambda c: c.data == 'noop')
+async def noop(query: CallbackQuery):
+    await query.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cartinc:'))
+async def cart_increase(query: CallbackQuery):
+    product_id = int(query.data.split(':')[1])
+    db.execute('UPDATE cart_items SET quantity = quantity + 1 WHERE user_id = ? AND product_id = ?', (query.from_user.id, product_id))
+    row = db.fetchone('SELECT quantity FROM cart_items WHERE user_id = ? AND product_id = ?', (query.from_user.id, product_id))
+    if row:
+        await query.message.edit_reply_markup(cart_item_markup(product_id, int(row[0])))
+    await query.answer('Количество увеличено.')
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cartdec:'))
+async def cart_decrease(query: CallbackQuery):
+    product_id = int(query.data.split(':')[1])
+    row = db.fetchone('SELECT quantity FROM cart_items WHERE user_id = ? AND product_id = ?', (query.from_user.id, product_id))
+    if not row:
+        await query.answer()
+        return
+    quantity = int(row[0]) - 1
+    if quantity <= 0:
+        db.execute('DELETE FROM cart_items WHERE user_id = ? AND product_id = ?', (query.from_user.id, product_id))
+        await query.message.delete()
+    else:
+        db.execute('UPDATE cart_items SET quantity = ? WHERE user_id = ? AND product_id = ?', (quantity, query.from_user.id, product_id))
+        await query.message.edit_reply_markup(cart_item_markup(product_id, quantity))
+    await query.answer('Корзина обновлена.')
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cartdel:'))
+async def cart_delete(query: CallbackQuery):
+    product_id = int(query.data.split(':')[1])
+    db.execute('DELETE FROM cart_items WHERE user_id = ? AND product_id = ?', (query.from_user.id, product_id))
+    await query.message.delete()
+    await query.answer('Товар удалён.')
 
 
 @dp.message_handler(IsUser(), text='📦 Оформить заказ')
-async def process_checkout(message: Message, state: FSMContext):
-    await CheckoutState.check_cart.set()
-    await checkout(message, state)
-
-
-async def checkout(message, state):
-    answer = ''
-    total_price = 0
-
-    async with state.proxy() as data:
-        for title, price, count_in_cart in data['products'].values():
-            tp = count_in_cart * price
-            answer += f'<b>{title}</b> * {count_in_cart}шт. = {tp}₸\n'
-            total_price += tp
-        data['checkout_total_price'] = total_price
-
-    await message.answer(f'{answer}\nОбщая сумма заказа: {total_price}₸.', reply_markup=check_markup())
-
-
-@dp.message_handler(IsUser(), lambda message: message.text not in [all_right_message, back_message], state=CheckoutState.check_cart)
-async def process_check_cart_invalid(message: Message):
-    await message.reply('Такого варианта не было.')
-
-
-@dp.message_handler(IsUser(), text=back_message, state=CheckoutState.check_cart)
-async def process_check_cart_back(message: Message, state: FSMContext):
-    await state.finish()
-    await process_cart(message, state)
-
-
-@dp.message_handler(IsUser(), text=all_right_message, state=CheckoutState.check_cart)
-async def process_check_cart_all_right(message: Message, state: FSMContext):
-    await CheckoutState.next()
-    await message.answer('Укажите свое имя.', reply_markup=back_markup())
-
-
-@dp.message_handler(IsUser(), text=back_message, state=CheckoutState.name)
-async def process_name_back(message: Message, state: FSMContext):
-    await CheckoutState.check_cart.set()
-    await checkout(message, state)
+async def checkout_start(message: Message):
+    rows = _cart_rows(message.from_user.id)
+    if not rows:
+        await message.answer('Корзина пуста.')
+        return
+    total = _cart_total(rows)
+    balance = db.get_balance(message.from_user.id)
+    if balance < total:
+        await message.answer(
+            f'Недостаточно баланса.\nНужно: <b>{total:.2f}₸</b>\nНа счёте: <b>{balance:.2f}₸</b>'
+        )
+        return
+    await CheckoutState.name.set()
+    await message.answer(f'Сумма заказа: <b>{total:.2f}₸</b>\nВведите имя получателя.')
 
 
 @dp.message_handler(IsUser(), state=CheckoutState.name)
-async def process_name(message: Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['name'] = message.text
-
-        if 'address' in data.keys():
-            await confirm(message)
-            await CheckoutState.confirm.set()
-        else:
-            await CheckoutState.next()
-            await message.answer('Укажите свой адрес места жительства.', reply_markup=back_markup())
-
-
-@dp.message_handler(IsUser(), text=back_message, state=CheckoutState.address)
-async def process_address_back(message: Message, state: FSMContext):
-    async with state.proxy() as data:
-        await message.answer('Изменить имя с <b>' + data['name'] + '</b>?', reply_markup=back_markup())
-
-    await CheckoutState.name.set()
+async def checkout_name(message: Message, state: FSMContext):
+    await state.update_data(customer_name=message.text.strip())
+    await CheckoutState.address.set()
+    await message.answer('Введите адрес доставки.')
 
 
 @dp.message_handler(IsUser(), state=CheckoutState.address)
-async def process_address(message: Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['address'] = message.text
-
-    await confirm(message)
-    await CheckoutState.next()
+async def checkout_address(message: Message, state: FSMContext):
+    await state.update_data(customer_address=message.text.strip())
+    await CheckoutState.confirm.set()
+    await message.answer('Подтвердить заказ?', reply_markup=confirm_order_markup())
 
 
-async def confirm(message):
-    await message.answer('Убедитесь, что все правильно оформлено и подтвердите заказ.', reply_markup=confirm_markup())
+@dp.message_handler(IsUser(), state=CheckoutState.confirm)
+async def checkout_confirm(message: Message, state: FSMContext):
+    if message.text == back_message:
+        await CheckoutState.address.set()
+        await message.answer('Введите адрес заново.')
+        return
+    if message.text != confirm_message:
+        await message.answer('Нажмите кнопку подтверждения или назад.')
+        return
 
+    rows = _cart_rows(message.from_user.id)
+    if not rows:
+        await state.finish()
+        await message.answer('Корзина пуста.', reply_markup=user_menu_markup())
+        return
 
-@dp.message_handler(IsUser(), lambda message: message.text not in [confirm_message, back_message], state=CheckoutState.confirm)
-async def process_confirm_invalid(message: Message):
-    await message.reply('Такого варианта не было.')
-
-
-@dp.message_handler(IsUser(), text=back_message, state=CheckoutState.confirm)
-async def process_confirm(message: Message, state: FSMContext):
-    await CheckoutState.address.set()
-
-    async with state.proxy() as data:
-        await message.answer('Изменить адрес с <b>' + data['address'] + '</b>?', reply_markup=back_markup())
-
-
-@dp.message_handler(IsUser(), text=confirm_message, state=CheckoutState.confirm)
-async def process_confirm(message: Message, state: FSMContext):
-    markup = ReplyKeyboardRemove()
-
-    async with state.proxy() as data:
-        cid = message.chat.id
-        total_price = int(data.get('checkout_total_price', 0))
-        current_balance = db.get_balance(message.from_user.id)
-
-        if current_balance < total_price:
-            await message.answer(
-                f'У вас недостаточно баланса.\nНужно: <b>{total_price}₸</b>\nСейчас на счете: <b>{int(current_balance)}₸</b>',
-                reply_markup=markup,
-            )
-            await state.finish()
-            return
-
-        products = [idx + '=' + str(quantity) for idx, quantity in db.fetchall('SELECT idx, quantity FROM cart WHERE cid=?', (cid,))]
-
-        db.query('INSERT INTO orders VALUES (?, ?, ?, ?)', (cid, data['name'], data['address'], ' '.join(products)))
-        db.query('DELETE FROM cart WHERE cid=?', (cid,))
-        db.query('UPDATE wallet SET balance = balance - ? WHERE uid = ?', (total_price, message.from_user.id))
-
-        logging.info('Deal was made.')
-        new_balance = db.get_balance(message.from_user.id)
+    total = _cart_total(rows)
+    balance = db.get_balance(message.from_user.id)
+    if balance < total:
+        await state.finish()
         await message.answer(
-            'Ок! Ваш заказ уже в пути 🚀\n'
-            'Имя: <b>' + data['name'] + '</b>\n'
-            'Адрес: <b>' + data['address'] + '</b>\n'
-            f'Списано: <b>{total_price}₸</b>\n'
-            f'Остаток: <b>{int(new_balance)}₸</b>',
-            reply_markup=markup,
+            f'Недостаточно баланса.\nНужно: <b>{total:.2f}₸</b>\nНа счёте: <b>{balance:.2f}₸</b>',
+            reply_markup=user_menu_markup(),
         )
+        return
 
+    data = await state.get_data()
+    db.execute('UPDATE wallets SET balance = balance - ?, updated_at = NOW() WHERE user_id = ?', (total, message.from_user.id))
+    db.execute(
+        '''
+        INSERT INTO orders (user_id, chat_id, customer_name, customer_address, total_amount)
+        VALUES (?, ?, ?, ?, ?)
+        ''',
+        (message.from_user.id, message.chat.id, data['customer_name'], data['customer_address'], total),
+    )
+    order_row = db.fetchone('SELECT id FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1', (message.from_user.id,))
+    order_id = int(order_row[0])
+    for product_id, title, _description, _photo, price, quantity in rows:
+        db.execute(
+            '''
+            INSERT INTO order_items (order_id, product_id, title, price, quantity)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (order_id, product_id, title, float(price), int(quantity)),
+        )
+    db.execute('DELETE FROM cart_items WHERE user_id = ?', (message.from_user.id,))
+    new_balance = db.get_balance(message.from_user.id)
     await state.finish()
+    await message.answer(
+        f'Заказ <b>#{order_id}</b> оформлен.\nСписано: <b>{total:.2f}₸</b>\nОстаток: <b>{new_balance:.2f}₸</b>',
+        reply_markup=user_menu_markup(),
+    )

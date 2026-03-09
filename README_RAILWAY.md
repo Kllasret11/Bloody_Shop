@@ -1,13 +1,33 @@
-Railway quick setup
+# Railway-ready магазин-бот
 
-1. Push this project to GitHub.
-2. In Railway create New Project -> Deploy from GitHub Repo.
-3. Add PostgreSQL to the project.
-4. In Variables add:
-   BOT_TOKEN=...
-   ADMINS=1160081337
-   LOGS_DIR=/app/logs
-5. Railway will automatically provide DATABASE_URL from PostgreSQL.
-6. Redeploy the service.
+Что уже сделано:
+- PostgreSQL вместо SQLite
+- вход в админку через `/admin`
+- логин/пароль администратора через переменные окружения
+- добавление категорий
+- добавление товаров
+- изменение цены товара
+- пополнение баланса пользователю
+- корзина
+- оформление заказа
+- проверка баланса перед покупкой
+- автоматическое списание денег после покупки
+- список заказов для пользователя и администратора
 
-The bot now works only with PostgreSQL. SQLite file storage is no longer used.
+## Railway Variables
+- `BOT_TOKEN`
+- `DATABASE_URL`
+- `ADMINS`
+- `ADMIN_LOGIN`
+- `ADMIN_PASSWORD`
+- `SHOP_TITLE`
+
+## Основные команды
+### Пользователь
+- `/start`
+- `/menu`
+
+### Администратор
+- `/admin`
+- `/menu`
+- `/addcategory`

@@ -1,45 +1,34 @@
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import Message
+
+from filters import IsUser
+from keyboards.default.markups import user_menu_markup
 from loader import dp, db
-from filters import IsAdmin, IsUser
-
-catalog = '🛍️ Каталог'
-balance = 'Профиль'
-cart = '🛒 Корзина'
-delivery_status = '🚚 Статус заказа'
-
-settings = '⚙️ Настройка каталога'
-orders = '🚚 Заказы'
-questions = '❓ Вопросы'
-add_money = '💸 Пополнить баланс'
-logout_admin = '🔒 Выйти из админ-панели'
-
-
-@dp.message_handler(IsAdmin(), commands='menu')
-async def admin_menu(message: Message):
-    message.bot.logger.user_id = message.from_user.id
-    message.bot.logger.log_info(content="Вызвал меню")
-    markup = ReplyKeyboardMarkup(selective=True, resize_keyboard=True)
-    markup.add(settings)
-    markup.add(add_money)
-    markup.add(questions, orders)
-    markup.add(logout_admin)
-
-    await message.answer('Админ-панель', reply_markup=markup)
-
-
-@dp.message_handler(IsAdmin(), text=logout_admin)
-async def admin_logout(message: Message):
-    db.deactivate_admin_session(message.from_user.id)
-    await message.answer('Вы вышли из админ-панели.', reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message_handler(IsUser(), commands='menu')
 async def user_menu(message: Message):
-    message.bot.logger.user_id = message.from_user.id
-    message.bot.logger.log_info(content="Вызвал меню")
-    markup = ReplyKeyboardMarkup(selective=True, resize_keyboard=True)
-    markup.add(catalog)
-    markup.add(balance, cart)
-    markup.add(delivery_status)
+    db.ensure_wallet(message.from_user.id, message.chat.id)
+    await message.answer('Меню магазина', reply_markup=user_menu_markup())
 
-    await message.answer('Меню', reply_markup=markup)
+
+@dp.message_handler(IsUser(), text='💰 Баланс')
+async def show_balance(message: Message):
+    db.ensure_wallet(message.from_user.id, message.chat.id)
+    balance = db.get_balance(message.from_user.id)
+    await message.answer(f'Ваш баланс: <b>{balance:.2f}₸</b>')
+
+
+@dp.message_handler(IsUser(), text='🚚 Мои заказы')
+async def show_orders(message: Message):
+    rows = db.fetchall(
+        'SELECT id, total_amount, status, created_at FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 10',
+        (message.from_user.id,),
+    )
+    if not rows:
+        await message.answer('У вас пока нет заказов.')
+        return
+    text = '\n\n'.join(
+        f'Заказ #{order_id}\nСумма: {float(total):.2f}₸\nСтатус: {status}\nДата: {created_at:%Y-%m-%d %H:%M}'
+        for order_id, total, status, created_at in rows
+    )
+    await message.answer(text)
