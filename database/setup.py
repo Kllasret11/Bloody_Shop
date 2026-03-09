@@ -1,18 +1,7 @@
-from database.db import get_connection
+from __future__ import annotations
 
-def setup_db():
-    conn = get_connection()
-    cur = conn.cursor()
+from utils.db.storage import DatabaseManager
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id BIGINT PRIMARY KEY,
-        balance INTEGER DEFAULT 0,
-        reputation INTEGER DEFAULT 0
-    )
-    """)
 
-    conn.commit()
-
-    cur.close()
-    conn.close()
+def setup_db() -> None:
+    DatabaseManager().create_tables()
